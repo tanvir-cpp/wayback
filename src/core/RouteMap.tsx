@@ -11,6 +11,8 @@ interface Props {
   floor: number; // floor being viewed
   heading: number | null;
   returning: boolean;
+  /** Screen areas covered by overlays (header, buttons, floor picker); the route is fitted into what's left. */
+  pad: { top: number; bottom: number; left: number; right: number };
 }
 
 /** Groups consecutive points on `floor` into separate runs (a floor change breaks the line). */
@@ -25,7 +27,7 @@ function runs(path: Pt[], floor: number): Pt[][] {
   return out;
 }
 
-export default function RouteMap({ path, ghost, floor, heading, returning }: Props) {
+export default function RouteMap({ path, ghost, floor, heading, returning, pad }: Props) {
   const [size, setSize] = useState({ w: 0, h: 0 });
   const onLayout = (e: LayoutChangeEvent) => setSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height });
 
@@ -40,9 +42,13 @@ export default function RouteMap({ path, ghost, floor, heading, returning }: Pro
   }, [path, ghost, floor]);
 
   const { w, h } = size;
-  const k = Math.min(w, h) / geo.span; // px per metre
-  const sx = (x: number) => w / 2 + (x - geo.cx) * k;
-  const sy = (y: number) => h / 2 - (y - geo.cy) * k; // north is up
+  const aw = Math.max(w - pad.left - pad.right, 1);
+  const ah = Math.max(h - pad.top - pad.bottom, 1);
+  const k = Math.min(aw, ah) / geo.span; // px per metre
+  const ox = pad.left + aw / 2;
+  const oy = pad.top + ah / 2;
+  const sx = (x: number) => ox + (x - geo.cx) * k;
+  const sy = (y: number) => oy - (y - geo.cy) * k; // north is up
   const toStr = (r: Pt[]) => r.map((p) => `${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(' ');
 
   const here = path[path.length - 1];
@@ -102,8 +108,8 @@ export default function RouteMap({ path, ghost, floor, heading, returning }: Pro
             </G>
           )}
           <G>
-            <Line x1={w - 28} y1={44} x2={w - 28} y2={24} stroke={COLORS.mute} strokeWidth={2} />
-            <SvgText x={w - 28} y={18} fontSize={12} fill={COLORS.mute} textAnchor="middle">N</SvgText>
+            <Line x1={pad.left + 14} y1={pad.top + 44} x2={pad.left + 14} y2={pad.top + 24} stroke={COLORS.mute} strokeWidth={2} />
+            <SvgText x={pad.left + 14} y={pad.top + 16} fontSize={12} fill={COLORS.mute} textAnchor="middle">N</SvgText>
           </G>
         </Svg>
       )}

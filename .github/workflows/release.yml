@@ -34,10 +34,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck and lint
+      - name: Typecheck, lint and test
         run: |
           npx tsc --noEmit
           npx expo lint
+          npm test
 
       - name: Check tag matches app version
         if: startsWith(github.ref, 'refs/tags/v')

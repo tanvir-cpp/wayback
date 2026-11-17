@@ -1,13 +1,17 @@
 import React, { useState } from 'react';
 import { Alert, Linking, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaProvider, initialWindowMetrics, useSafeAreaInsets } from 'react-native-safe-area-context';
 import RouteMap, { COLORS as C } from './src/core/RouteMap';
 import { useSession } from './src/core/useSession';
 import { Perm, requestMotion } from './src/core/permissions';
 
 const floorName = (f: number) => (f === 0 ? 'Start floor' : f > 0 ? `${f} up` : `${-f} down`);
 const floorTag = (f: number) => (f === 0 ? '0' : f > 0 ? `+${f}` : `${f}`);
+const ago = (t: number) => {
+  const m = Math.max(1, Math.round((Date.now() - t) / 60000));
+  return m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+};
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
 function Btn({ label, onPress, accent, ghost }: { label: string; onPress: () => void; accent?: boolean; ghost?: boolean }) {
@@ -25,7 +29,7 @@ function Btn({ label, onPress, accent, ghost }: { label: string; onPress: () => 
 
 function Screen() {
   const insets = useSafeAreaInsets();
-  const { state, dispatch, sensors, start, reset, guide, stats } = useSession();
+  const { state, dispatch, sensors, background, saved, start, reset, resume, discard, guide, stats } = useSession();
   const { mode, path, ghost, floor, heading } = state;
   const returning = mode === 'returning';
   const live = mode === 'tracking' || returning;
@@ -49,11 +53,18 @@ function Screen() {
       { text: 'Start over', style: 'destructive', onPress: () => { reset(); begin(); } },
     ]);
 
+  const [headH, setHeadH] = useState(0);
+  const [bottomH, setBottomH] = useState(0);
+  const gutter = Math.max(20, insets.left + 12, insets.right + 12);
+
   const manual = live && sensors !== null && (sensors.steps === 'none' || !sensors.floors);
 
   let title = '';
   let detail = '';
-  if (mode === 'idle') {
+  if (mode === 'idle' && saved) {
+    title = 'Resume your visit?';
+    detail = `${saved.steps} steps recorded ${ago(saved.savedAt)}. Pick up where you left off and we’ll still guide you back to your start.`;
+  } else if (mode === 'idle') {
     title = 'Wayback';
     detail = perm
       ? 'Motion access is off, so steps are estimated from movement and may be less accurate.'
@@ -83,17 +94,17 @@ function Screen() {
 
       {live || mode === 'arrived' ? (
         <View style={StyleSheet.absoluteFill}>
-          <RouteMap path={path} ghost={ghost} floor={viewFloor} heading={heading} returning={returning} />
+          <RouteMap path={path} ghost={ghost} floor={viewFloor} heading={heading} returning={returning} pad={{ top: headH + 8, bottom: bottomH + 8, left: insets.left + 12, right: floors.length > 1 ? insets.right + 56 : insets.right + 12 }} />
         </View>
       ) : null}
 
-      <View style={[s.head, { paddingTop: insets.top + 24 }]} pointerEvents="none">
+      <View style={[s.head, { paddingTop: insets.top + 24, paddingHorizontal: gutter + 8, paddingRight: gutter + 56 }]} onLayout={(e) => setHeadH(e.nativeEvent.layout.height)} pointerEvents="none">
         <Text style={mode === 'tracking' || mode === 'idle' ? s.big : s.mid}>{title}</Text>
         <Text style={s.detail}>{detail}</Text>
       </View>
 
       {live && floors.length > 1 && (
-        <View style={[s.floors, { top: insets.top + 24 }]}>
+        <View style={[s.floors, { top: insets.top + 24, right: insets.right + 8 }]}>
           {floors.map((f) => (
             <TouchableOpacity key={f} onPress={() => setPick({ at: floor, f })} style={s.floorHit} accessibilityLabel={`Show ${floorName(f)}`}>
               <Text style={[s.floorText, viewFloor === f && s.floorOn]}>{floorTag(f)}</Text>
@@ -103,12 +114,13 @@ function Screen() {
         </View>
       )}
 
-      <View style={[s.bottom, { paddingBottom: Math.max(insets.bottom, 16) + 8 }]}>
+      <View style={[s.bottom, { paddingBottom: Math.max(insets.bottom, 16) + 8, paddingHorizontal: gutter }]} onLayout={(e) => setBottomH(e.nativeEvent.layout.height)}>
         {returning && (
           <View style={s.track}>
             <View style={[s.trackFill, { width: `${stats.percentBack}%` }]} />
           </View>
         )}
+        {live && sensors && !background && <Text style={s.note}>Keep Wayback open: background tracking is unavailable.</Text>}
         {mode === 'tracking' && sensors && sensors.steps === 'none' && <Text style={s.note}>No step sensor found. Use manual steps below.</Text>}
         {manual && (
           <View style={s.manual}>
@@ -120,10 +132,12 @@ function Screen() {
           </View>
         )}
 
-        {mode === 'idle' && !perm && <Btn label="Start" onPress={begin} />}
-        {mode === 'idle' && perm === 'blocked' && <Btn label="Open settings" onPress={() => Linking.openSettings()} />}
-        {mode === 'idle' && perm === 'denied' && <Btn label="Allow motion access" onPress={begin} />}
-        {mode === 'idle' && perm && <Btn ghost label="Start anyway" onPress={beginAnyway} />}
+        {mode === 'idle' && saved && <Btn label="Resume visit" onPress={resume} />}
+        {mode === 'idle' && saved && <Btn ghost label="Discard it" onPress={discard} />}
+        {mode === 'idle' && !saved && !perm && <Btn label="Start" onPress={begin} />}
+        {mode === 'idle' && !saved && perm === 'blocked' && <Btn label="Open settings" onPress={() => Linking.openSettings()} />}
+        {mode === 'idle' && !saved && perm === 'denied' && <Btn label="Allow motion access" onPress={begin} />}
+        {mode === 'idle' && !saved && perm && <Btn ghost label="Start anyway" onPress={beginAnyway} />}
         {mode === 'tracking' && <Btn accent label="Take me back" onPress={() => dispatch({ type: 'return' })} />}
         {returning && <Btn ghost label="Keep exploring" onPress={() => dispatch({ type: 'resume' })} />}
         {live && <Text style={s.startOver} onPress={startOver} accessibilityRole="button">Start over</Text>}
@@ -135,7 +149,7 @@ function Screen() {
 
 export default function App() {
   return (
-    <SafeAreaProvider>
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
       <Screen />
     </SafeAreaProvider>
   );

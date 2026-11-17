@@ -8,7 +8,10 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0A0A0B",
-    "platforms": ["ios", "android"],
+    "platforms": [
+      "ios",
+      "android"
+    ],
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.wayback.app"
@@ -20,7 +23,12 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "permissions": ["android.permission.ACTIVITY_RECOGNITION"],
+      "permissions": [
+        "android.permission.ACTIVITY_RECOGNITION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_HEALTH",
+        "android.permission.POST_NOTIFICATIONS"
+      ],
       "predictiveBackGestureEnabled": false
     },
     "plugins": [
@@ -37,7 +45,8 @@
           "image": "./assets/splash-icon.png",
           "imageWidth": 160
         }
-      ]
+      ],
+      "./plugins/withForegroundService"
     ]
   }
 }

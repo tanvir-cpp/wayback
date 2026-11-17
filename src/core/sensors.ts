@@ -1,80 +1,87 @@
 import { Platform } from 'react-native';
-import { Accelerometer, Barometer, Magnetometer, Pedometer } from 'expo-sensors';
-import { FloorDetector, computeHeading, smoothHeading } from './path';
+import { Accelerometer, Barometer, Gyroscope, Magnetometer, Pedometer } from 'expo-sensors';
+import { FloorDetector, GravityFilter, HeadingFilter, StepDetector, computeHeading } from './path';
 
 export interface SensorHandlers {
   onSteps: (count: number) => void;
   onHeading: (deg: number) => void;
   onFloor: (delta: number) => void;
 }
-export interface SensorStatus { steps: 'pedometer' | 'motion' | 'none'; compass: boolean; floors: boolean }
-
+export interface SensorStatus { steps: 'motion' | 'none'; pedometer: boolean; compass: boolean; gyro: boolean; floors: boolean }
 type Sub = { remove: () => void };
 
-/** Starts step counting, compass and barometer. Returns what is actually available plus a stop function. */
+const safe = async <T,>(fn: () => Promise<T>, fallback: T) => {
+  try { return await fn(); } catch { return fallback; }
+};
+
+/**
+ * Starts step counting, heading and floor detection.
+ * - Steps: our own detector (works in hand/pocket/bag) merged with the hardware pedometer; we never count fewer
+ *   steps than either source saw.
+ * - Heading: gyroscope for smooth turns, gently corrected by the compass.
+ * - Floors: barometric pressure.
+ */
 export async function startSensors(h: SensorHandlers): Promise<{ status: SensorStatus; stop: () => void }> {
   const subs: Sub[] = [];
-  const status: SensorStatus = { steps: 'none', compass: false, floors: false };
-  if (Platform.OS === 'web') return { status, stop: () => {} };
+  const status: SensorStatus = { steps: 'none', pedometer: false, compass: false, gyro: false, floors: false };
 
-  const safe = async <T,>(fn: () => Promise<T>, fallback: T) => {
-    try { return await fn(); } catch { return fallback; }
+  // Merge two step sources by taking the larger running total, so nothing is lost or double counted
+  let own = 0, hw = 0, emitted = 0;
+  const emit = () => {
+    const total = Math.max(own, hw);
+    if (total > emitted) { h.onSteps(total - emitted); emitted = total; }
   };
 
-  // --- Steps: hardware pedometer when permitted, otherwise detect steps from accelerometer peaks
-  const pedometerOk =
-    (await safe(() => Pedometer.isAvailableAsync(), false)) &&
-    (await safe(async () => (await Pedometer.requestPermissionsAsync()).granted, false));
-  if (pedometerOk) {
-    let last = 0;
-    subs.push(Pedometer.watchStepCount(({ steps }) => {
-      const delta = steps - last; // updates can arrive in batches, so count the difference
-      last = steps;
-      if (delta > 0) h.onSteps(delta);
-    }));
-    status.steps = 'pedometer';
+  if (await safe(async () => (await Pedometer.isAvailableAsync()) && (await Pedometer.requestPermissionsAsync()).granted, false)) {
+    subs.push(Pedometer.watchStepCount(({ steps }) => { hw = steps; emit(); }));
+    status.pedometer = true;
   }
 
-  // --- Accelerometer: gravity for tilt-compensated heading, and step fallback
-  const accelOk = await safe(() => Accelerometer.isAvailableAsync(), false);
-  let acc = { x: 0, y: 0, z: 1 };
-  let smooth = 1;
-  let wasAbove = false;
-  let lastStepAt = 0;
-  if (accelOk) {
-    Accelerometer.setUpdateInterval(40);
+  // iOS reports acceleration with the opposite sign to Android; normalise to "flat on a table = +1 g up"
+  const sign = Platform.OS === 'ios' ? -1 : 1;
+  const gravity = new GravityFilter();
+  const stepper = new StepDetector();
+  let up = { x: 0, y: 0, z: 1 };
+  let accel = { x: 0, y: 0, z: 1 };
+
+  if (await safe(() => Accelerometer.isAvailableAsync(), false)) {
+    Accelerometer.setUpdateInterval(20);
     subs.push(Accelerometer.addListener((a) => {
-      acc = a;
-      if (status.steps === 'pedometer') return;
-      const mag = Math.hypot(a.x, a.y, a.z);
-      smooth += 0.3 * (mag - smooth);
-      const above = smooth > 1.12;
+      accel = { x: a.x * sign, y: a.y * sign, z: a.z * sign };
       const now = Date.now();
-      if (above && !wasAbove && now - lastStepAt > 300) {
-        lastStepAt = now;
-        h.onSteps(1);
-      }
-      wasAbove = above;
+      up = gravity.feed(accel, now);
+      const n = stepper.feed(accel, now);
+      if (n) { own += n; emit(); }
     }));
-    if (status.steps === 'none') status.steps = 'motion';
+    status.steps = 'motion';
   }
 
-  // --- Compass
-  if (accelOk && (await safe(() => Magnetometer.isAvailableAsync(), false))) {
+  // Heading: gyro integration + compass correction
+  const heading = new HeadingFilter();
+  let sent = -999;
+  const publish = (deg: number | null) => {
+    if (deg !== null && Math.abs(deg - sent) > 1.5) { sent = deg; h.onHeading(deg); }
+  };
+  const haveMag = status.steps === 'motion' && (await safe(() => Magnetometer.isAvailableAsync(), false));
+  if (haveMag) {
     Magnetometer.setUpdateInterval(100);
-    let heading: number | null = null;
-    let sent = -999;
     subs.push(Magnetometer.addListener((m) => {
-      heading = smoothHeading(heading, computeHeading(acc, m));
-      if (Math.abs(heading - sent) > 2) {
-        sent = heading;
-        h.onHeading(heading);
-      }
+      publish(heading.compass(computeHeading(accel, m), Math.hypot(m.x, m.y, m.z)));
     }));
     status.compass = true;
   }
+  if (status.steps === 'motion' && (await safe(() => Gyroscope.isAvailableAsync(), false))) {
+    Gyroscope.setUpdateInterval(20);
+    let last = 0;
+    subs.push(Gyroscope.addListener((w) => {
+      const now = Date.now();
+      if (last) heading.gyro(w, up, Math.min(now - last, 100) / 1000);
+      last = now;
+      publish(heading.h);
+    }));
+    status.gyro = true;
+  }
 
-  // --- Floors from air pressure
   if (await safe(() => Barometer.isAvailableAsync(), false)) {
     const detector = new FloorDetector();
     Barometer.setUpdateInterval(500);

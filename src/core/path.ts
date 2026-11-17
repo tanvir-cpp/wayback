@@ -30,7 +30,11 @@ export type Action =
   | { type: 'return' }
   | { type: 'resume' }
   | { type: 'finish'; at: number }
+  | { type: 'restore'; saved: Saved }
   | { type: 'reset' };
+
+/** What is written to disk so a visit survives the app being closed or killed. */
+export type Saved = Pick<State, 'mode' | 'path' | 'ghost' | 'floor' | 'steps' | 'returnTotalM' | 'startedAt'> & { savedAt: number };
 
 export const initialState: State = {
   mode: 'idle', path: [], ghost: [], floor: 0, heading: null, steps: 0, returnTotalM: 0, startedAt: 0, endedAt: 0,
@@ -132,6 +136,8 @@ export function reducer(s: State, a: Action): State {
       return s.mode === 'returning' ? { ...s, mode: 'tracking', ghost: [] } : s;
     case 'finish':
       return { ...s, endedAt: a.at };
+    case 'restore':
+      return { ...initialState, ...a.saved, heading: s.heading };
     case 'reset':
       return { ...initialState, heading: s.heading };
   }
@@ -192,5 +198,84 @@ export class FloorDetector {
     this.base -= (delta * FLOOR_HEIGHT_M) / HPA_TO_M; // keep any leftover so consecutive floors stay accurate
     this.candidate = 0;
     return delta;
+  }
+}
+
+// ---------- Heading: gyroscope-led, compass-corrected ----------
+/**
+ * Tracks which way the user faces. The gyroscope gives smooth turns that ignore magnetic interference
+ * (indoors the raw compass is noisy); the compass only gently pulls the estimate back so it can't drift away.
+ * `up` is the unit vector pointing up, in device coordinates, so yaw works whatever way the phone is held.
+ */
+export class HeadingFilter {
+  h: number | null = null;
+
+  gyro(w: V3, up: V3, dtSec: number) {
+    if (this.h === null) return;
+    const yawRate = w.x * up.x + w.y * up.y + w.z * up.z; // rad/s, counter-clockwise positive
+    this.h = norm(this.h - (yawRate * dtSec * 180) / Math.PI);
+  }
+
+  /** compassDeg from computeHeading; fieldUT is |magnetometer| in microtesla, used to ignore disturbed readings. */
+  compass(compassDeg: number, fieldUT: number): number | null {
+    if (this.h === null) this.h = compassDeg;
+    else if (fieldUT >= 20 && fieldUT <= 70) this.h = norm(this.h + angleDiff(this.h, compassDeg) * 0.012);
+    return this.h;
+  }
+}
+
+/** Slowly tracks gravity (the "up" direction) so arm swing and steps don't tilt the heading. */
+export class GravityFilter {
+  private g: V3 = { x: 0, y: 0, z: 1 };
+  private t = 0;
+
+  feed(a: V3, tMs: number): V3 {
+    const dt = this.t ? Math.min(tMs - this.t, 100) : 100;
+    this.t = tMs;
+    const k = 1 - Math.exp(-dt / 600);
+    this.g = { x: this.g.x + k * (a.x - this.g.x), y: this.g.y + k * (a.y - this.g.y), z: this.g.z + k * (a.z - this.g.z) };
+    return unit(this.g);
+  }
+}
+
+// ---------- Steps: works with the phone in a hand, pocket or bag ----------
+/**
+ * Orientation-independent step detector: removes gravity from the acceleration magnitude, smooths it,
+ * and picks peaks against an adaptive threshold so gentle hand-held walking counts as well as pocket bounce.
+ * Needs two rhythmic peaks before counting, which rejects one-off hand movements.
+ */
+export class StepDetector {
+  private mean = 1;
+  private s = 0;
+  private p1 = 0;
+  private p2 = 0;
+  private env = 0.15;
+  private t = 0;
+  private lastPeak = 0;
+  private streak = 0;
+
+  /** Returns how many steps to count for this sample (usually 0 or 1; 2 when walking is first recognised). */
+  feed(a: V3, tMs: number): number {
+    const dt = this.t ? Math.min(Math.max(tMs - this.t, 5), 100) : 20;
+    this.t = tMs;
+    const m = Math.hypot(a.x, a.y, a.z);
+    this.mean += (1 - Math.exp(-dt / 1000)) * (m - this.mean);
+    this.s += (1 - Math.exp(-dt / 40)) * (m - this.mean - this.s);
+    let steps = 0;
+    const isPeak = this.p1 > this.p2 && this.p1 >= this.s;
+    if (isPeak && this.p1 > Math.max(0.05, this.env * 0.5) && tMs - this.lastPeak > 280) {
+      this.env += 0.25 * (this.p1 - this.env);
+      if (tMs - this.lastPeak < 1100) {
+        this.streak++;
+        steps = this.streak === 2 ? 2 : this.streak > 2 ? 1 : 0;
+      } else {
+        this.streak = 1;
+      }
+      this.lastPeak = tMs;
+    }
+    this.p2 = this.p1;
+    this.p1 = this.s;
+    this.env = Math.max(0.1, this.env * Math.pow(0.9997, dt / 20)); // threshold relaxes when the phone is held steadier
+    return steps;
   }
 }

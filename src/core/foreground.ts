@@ -1,5 +1,16 @@
 import { PermissionsAndroid, Platform } from 'react-native';
-import BackgroundService from 'react-native-background-actions';
+
+type Service = { start: (task: () => Promise<void>, options: object) => Promise<void>; stop: () => Promise<void> };
+
+// Loaded lazily: if the native module is missing or broken, the app must still open and record in the foreground.
+const service = (): Service | null => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('react-native-background-actions').default as Service;
+  } catch {
+    return null;
+  }
+};
 
 /**
  * Android foreground service: keeps the app (and its sensor listeners) alive with the screen off or the app in
@@ -8,8 +19,10 @@ import BackgroundService from 'react-native-background-actions';
 export async function startForeground(): Promise<boolean> {
   if (Platform.OS !== 'android') return false;
   try {
+    const svc = service();
+    if (!svc) return false;
     if (Number(Platform.Version) >= 33) await PermissionsAndroid.request('android.permission.POST_NOTIFICATIONS');
-    await BackgroundService.start(() => new Promise<void>(() => {}), {
+    await svc.start(() => new Promise<void>(() => {}), {
       taskName: 'wayback',
       taskTitle: 'Recording your route',
       taskDesc: 'Wayback is tracking your steps so it can guide you back.',
@@ -24,5 +37,5 @@ export async function startForeground(): Promise<boolean> {
 }
 
 export async function stopForeground() {
-  if (Platform.OS === 'android') await BackgroundService.stop().catch(() => {});
+  try { await service()?.stop(); } catch { /* nothing running */ }
 }
